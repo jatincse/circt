@@ -240,7 +240,7 @@ static void buildModule(OpBuilder &builder, OperationState &result,
       continue;
 
     auto argAttr =
-        NamedAttribute(builder.getIdentifier(kFIRRTLName), ports[i].first);
+        NamedAttribute(builder.getIdentifier("firrtl.name"), ports[i].first);
 
     result.addAttribute(getArgAttrName(i, attrNameBuf),
                         builder.getDictionaryAttr(argAttr));
@@ -314,7 +314,7 @@ static void printFunctionSignature2(OpAsmPrinter &p, Operation *op,
 
         // If the name is the same as we would otherwise use, then we're good!
         if (tmpStream.str().drop_front() == nameAttr.getValue()) {
-          tmp = kFIRRTLName;
+          tmp = "firrtl.name";
           elidedAttrs = tmp;
         }
       }
@@ -420,7 +420,7 @@ static ParseResult parseFModuleOp(OpAsmParser &parser, OperationState &result,
     // If an explicit name attribute was present, don't add the implicit one.
     bool hasNameAttr = false;
     for (auto &elt : attrs)
-      if (elt.first.str() == kFIRRTLName)
+      if (elt.first.str() == "firrtl.name")
         hasNameAttr = true;
     if (hasNameAttr || entryArgs.empty())
       continue;
@@ -434,7 +434,7 @@ static ParseResult parseFModuleOp(OpAsmParser &parser, OperationState &result,
       continue;
 
     auto nameAttr = StringAttr::get(arg.name.drop_front(), context);
-    attrs.push_back({Identifier::get(kFIRRTLName, context), nameAttr});
+    attrs.push_back({Identifier::get("firrtl.name", context), nameAttr});
   }
 
   // Add the attributes to the function arguments.
@@ -471,7 +471,7 @@ static LogicalResult verifyFModuleOp(FModuleOp &module) {
 // to FunctionLike.
 void FModuleOp::eraseArguments(ArrayRef<unsigned> argIndices) {
   auto oldType = getType();
-  int originalNumArgs = oldType.getNumInputs();
+  size_t originalNumArgs = oldType.getNumInputs();
   llvm::BitVector eraseIndices(originalNumArgs);
   for (auto index : argIndices)
     eraseIndices.set(index);
@@ -485,7 +485,7 @@ void FModuleOp::eraseArguments(ArrayRef<unsigned> argIndices) {
   // Update the function type and arg attrs.
   SmallVector<Type, 4> newInputTypes;
   SmallVector<MutableDictionaryAttr, 4> newArgAttrs;
-  for (int i = 0; i < originalNumArgs; i++) {
+  for (size_t i = 0; i < originalNumArgs; ++i) {
     if (shouldEraseArg(i))
       continue;
     newInputTypes.emplace_back(oldType.getInput(i));
@@ -498,7 +498,7 @@ void FModuleOp::eraseArguments(ArrayRef<unsigned> argIndices) {
   // We do this in reverse so that we erase later indices before earlier
   // indices, to avoid shifting the later indices.
   Block &entry = front();
-  for (int i = 0; i < originalNumArgs; i++)
+  for (size_t i = 0; i < originalNumArgs; ++i)
     if (shouldEraseArg(originalNumArgs - i - 1))
       entry.eraseArgument(originalNumArgs - i - 1);
 }

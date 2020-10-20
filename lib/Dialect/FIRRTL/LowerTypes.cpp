@@ -1,6 +1,11 @@
 //===- LowerTypes.cpp - Lower FIRRTL types to ground types ----------------===//
 //
-//===----------------------------------------------------------------------===//
+// Copyright 2020 The CIRCT Authors.
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// =============================================================================
 
 #include "PassDetails.h"
 #include "circt/Dialect/FIRRTL/Ops.h"
@@ -8,14 +13,53 @@
 #include "circt/Dialect/FIRRTL/Types.h"
 #include "circt/Dialect/FIRRTL/Visitors.h"
 #include "circt/Support/LLVM.h"
+#include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringMap.h"
 using namespace circt;
 using namespace firrtl;
 
-static Type getPortType(FlatBundleFieldEntry field) {
-  return field.isOutput && field.type.isa<FIRRTLType>()
-             ? FlipType::get(field.type.dyn_cast<FIRRTLType>())
-             : field.type;
+// This represents a flattened bundle field element.
+struct FlatBundleFieldEntry {
+  // This is the underlying ground type of the field.
+  FIRRTLType type;
+  // This is a suffix to add to the field name to make it unique.
+  std::string suffix;
+  // This indicates whether the field was flipped to be an output.
+  bool isOutput;
+};
+
+// Helper to determine if a fully flattened type needs to be flipped.
+static FIRRTLType getPortType(FlatBundleFieldEntry field) {
+  return field.isOutput ? FlipType::get(field.type) : field.type;
+}
+
+// Convert a nested bundle of fields into a flat list of fields.  This is used
+// when working with instances and mems to flatten them.
+static void flattenBundleTypes(FIRRTLType type, StringRef suffixSoFar,
+                               bool isFlipped,
+                               SmallVectorImpl<FlatBundleFieldEntry> &results) {
+  if (auto flip = type.dyn_cast<FlipType>())
+    return flattenBundleTypes(flip.getElementType(), suffixSoFar, !isFlipped,
+                              results);
+
+  // In the base case we record this field.
+  auto bundle = type.dyn_cast<BundleType>();
+  if (!bundle) {
+    results.push_back({type, suffixSoFar.str(), isFlipped});
+    return;
+  }
+
+  SmallString<16> tmpSuffix(suffixSoFar);
+
+  // Otherwise, we have a bundle type.  Break it down.
+  for (auto &elt : bundle.getElements()) {
+    // Construct the suffix to pass down.
+    tmpSuffix.resize(suffixSoFar.size());
+    tmpSuffix.push_back('_');
+    tmpSuffix.append(elt.first.strref());
+    // Recursively process subelements.
+    flattenBundleTypes(elt.second, tmpSuffix, isFlipped, results);
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -155,7 +199,7 @@ void FIRRTLTypesLowering::lowerArg(BlockArgument arg, Type type) {
 LogicalResult FIRRTLTypesLowering::visitDecl(InstanceOp op) {
   auto originalType = op.result().getType().dyn_cast<BundleType>();
   if (!originalType) {
-    op.emitError() << "instance result was not bundle type.";
+    op.emitError("instance result was not bundle type");
     return failure();
   }
 
@@ -170,7 +214,7 @@ LogicalResult FIRRTLTypesLowering::visitDecl(InstanceOp op) {
       for (auto field : fieldTypes) {
         // Store the flat type for the new bundle type.
         auto flatName = builder->getIdentifier(field.suffix);
-        auto flatType = getPortType(field).cast<FIRRTLType>();
+        auto flatType = getPortType(field);
         auto newElement = BundleType::BundleElement(flatName, flatType);
         bundleElements.push_back(newElement);
       }
@@ -209,7 +253,7 @@ LogicalResult FIRRTLTypesLowering::visitExpr(SubfieldOp op) {
     // When the input is from a block argument, map the result to the root
     // bundle block argument, and begin creating a suffix string.
     rootBundle = input;
-    suffix.push_back(kFlatBundleFieldSeparator);
+    suffix.push_back('_');
     suffix += fieldname;
   } else if (input.isa<OpResult>()) {
     Operation *owner = input.cast<OpResult>().getOwner();
@@ -218,7 +262,7 @@ LogicalResult FIRRTLTypesLowering::visitExpr(SubfieldOp op) {
       // parent.
       auto subfieldLowering = getSubfieldLowering(input);
       if (!subfieldLowering.hasValue()) {
-        op.emitError() << "didn't find subfield lowering for input";
+        op.emitError("didn't find subfield lowering for input");
         return failure();
       }
 
@@ -227,21 +271,21 @@ LogicalResult FIRRTLTypesLowering::visitExpr(SubfieldOp op) {
       auto subfieldInfo = subfieldLowering.getValue();
       rootBundle = subfieldInfo.first;
       suffix.assign(subfieldInfo.second);
-      suffix.push_back(kFlatBundleFieldSeparator);
+      suffix.push_back('_');
       suffix.append(fieldname);
     } else if (isa<InstanceOp>(owner)) {
       // When the input is from an instance, look up the new instance.
       Optional<Value> newInstance = getInstanceLowering(input);
       if (!newInstance.hasValue()) {
-        op.emitError() << "couldn't get lowered instance.";
+        op.emitError("couldn't get lowered instance");
+        return failure();
       }
 
       // Check if this subfield was originally a bundle type.
       BundleType oldType = input.getType().cast<BundleType>();
       FIRRTLType elementType = oldType.getElementType(fieldname);
       if (!elementType) {
-        op.emitError() << "no element found for " << fieldname << " in "
-                       << oldType << ".";
+        op.emitError("no element found for ") << fieldname << " in " << oldType;
         return failure();
       }
 
@@ -306,8 +350,9 @@ LogicalResult FIRRTLTypesLowering::visitStmt(ConnectOp op) {
 
   // Check that we got out the same number of values from each bundle.
   if (lhsValues.size() != rhsValues.size()) {
-    op.emitError() << "lhs value expands to " << lhsValues.size()
-                   << " values, but rhs value expands to " << rhsValues.size();
+    op.emitError("lhs value expands to ")
+        << lhsValues.size() << " values, but rhs value expands to "
+        << rhsValues.size();
     return failure();
   }
 
@@ -332,7 +377,7 @@ static DictionaryAttr getArgAttrs(StringAttr nameAttr, StringRef suffix,
   newName += suffix;
 
   StringAttr newNameAttr = builder->getStringAttr(newName);
-  Identifier identifier = builder->getIdentifier(kFIRRTLName);
+  Identifier identifier = builder->getIdentifier("firrtl.name");
   NamedAttribute attr = NamedAttribute(identifier, newNameAttr);
 
   return builder->getDictionaryAttr(attr);
@@ -377,11 +422,10 @@ void FIRRTLTypesLowering::setBundleLowering(Value oldValue, StringRef flatField,
 Optional<Value> FIRRTLTypesLowering::getBundleLowering(Value oldValue,
                                                        StringRef flatField) {
   if (oldValue && loweredBundleValues.count(oldValue) &&
-      loweredBundleValues[oldValue].count(flatField)) {
+      loweredBundleValues[oldValue].count(flatField))
     return Optional<Value>(loweredBundleValues[oldValue][flatField]);
-  } else {
-    return None;
-  }
+
+  return None;
 }
 
 // For a mapped bundle typed value, retrieve and return the flat values for each
@@ -392,14 +436,14 @@ void FIRRTLTypesLowering::getAllBundleLowerings(
     BundleType bundleType = value.getType().cast<BundleType>();
     for (auto element : bundleType.getElements()) {
       SmallString<16> loweredName;
-      loweredName.push_back(kFlatBundleFieldSeparator);
+      loweredName.push_back('_');
       loweredName.append(element.first);
 
       if (loweredBundleValues[value].count(loweredName)) {
         results.push_back(loweredBundleValues[value][loweredName]);
       } else {
-        getOperation().emitError()
-            << "expected to find " << loweredName << " for value.";
+        getOperation().emitError("expected to find ")
+            << loweredName << " for value";
       }
     }
   }
@@ -429,11 +473,10 @@ void FIRRTLTypesLowering::setSubfieldLowering(Value subfield, Value rootBundle,
 // the suffix that had been constructed so far.
 Optional<FIRRTLTypesLowering::ValueField>
 FIRRTLTypesLowering::getSubfieldLowering(Value subfield) {
-  if (loweredSubfieldInfo.count(subfield)) {
+  if (loweredSubfieldInfo.count(subfield))
     return Optional<ValueField>(loweredSubfieldInfo[subfield]);
-  } else {
-    return None;
-  }
+
+  return None;
 }
 
 // Remember an argument number to erase during cleanup.

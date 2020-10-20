@@ -2,6 +2,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+// clang-tidy seems to expect the absolute path in the header guard on some
+// systems, so just disable it.
+// NOLINTNEXTLINE(llvm-header-guard)
 #ifndef DIALECT_FIRRTL_PASSDETAILS_H
 #define DIALECT_FIRRTL_PASSDETAILS_H
 
