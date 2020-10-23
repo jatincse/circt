@@ -197,11 +197,8 @@ void FIRRTLTypesLowering::lowerArg(BlockArgument arg, Type type) {
 // ensuring both lowerings are the same, we can process every module in the
 // circuit in parallel, and every instance will have the correct ports.
 LogicalResult FIRRTLTypesLowering::visitDecl(InstanceOp op) {
-  auto originalType = op.result().getType().dyn_cast<BundleType>();
-  if (!originalType) {
-    op.emitError("instance result was not bundle type");
-    return failure();
-  }
+  // The instance's ports are represented as one value with a bundle type.
+  BundleType originalType = op.result().getType().cast<BundleType>();
 
   // Create a new, flat bundle type for the new result
   SmallVector<BundleType::BundleElement, 8> bundleElements;
@@ -261,10 +258,7 @@ LogicalResult FIRRTLTypesLowering::visitExpr(SubfieldOp op) {
       // When the input is from a subfield, look up the lowered info from the
       // parent.
       auto subfieldLowering = getSubfieldLowering(input);
-      if (!subfieldLowering.hasValue()) {
-        op.emitError("didn't find subfield lowering for input");
-        return failure();
-      }
+      assert(subfieldLowering.hasValue() && "no subfield lowering for input");
 
       // Map the result to the root bundle block argument, and append the
       // suffix to what was already mapped.
@@ -276,18 +270,12 @@ LogicalResult FIRRTLTypesLowering::visitExpr(SubfieldOp op) {
     } else if (isa<InstanceOp>(owner)) {
       // When the input is from an instance, look up the new instance.
       Optional<Value> newInstance = getInstanceLowering(input);
-      if (!newInstance.hasValue()) {
-        op.emitError("couldn't get lowered instance");
-        return failure();
-      }
+      assert(newInstance.hasValue() && "no instance lowering for input");
 
       // Check if this subfield was originally a bundle type.
       BundleType oldType = input.getType().cast<BundleType>();
       FIRRTLType elementType = oldType.getElementType(fieldname);
-      if (!elementType) {
-        op.emitError("no element found for ") << fieldname << " in " << oldType;
-        return failure();
-      }
+      assert(elementType && "no element found in lowered bundle");
 
       if (elementType.isa<BundleType>()) {
         // If it was a bundle, flatten it the usual way.
@@ -349,12 +337,8 @@ LogicalResult FIRRTLTypesLowering::visitStmt(ConnectOp op) {
   getAllBundleLowerings(rhs, rhsValues);
 
   // Check that we got out the same number of values from each bundle.
-  if (lhsValues.size() != rhsValues.size()) {
-    op.emitError("lhs value expands to ")
-        << lhsValues.size() << " values, but rhs value expands to "
-        << rhsValues.size();
-    return failure();
-  }
+  assert(lhsValues.size() == rhsValues.size() &&
+         "connected bundles don't match");
 
   for (auto tuple : llvm::zip_first(lhsValues, rhsValues)) {
     Value newLhs = std::get<0>(tuple);
@@ -439,12 +423,10 @@ void FIRRTLTypesLowering::getAllBundleLowerings(
       loweredName.push_back('_');
       loweredName.append(element.first);
 
-      if (loweredBundleValues[value].count(loweredName)) {
-        results.push_back(loweredBundleValues[value][loweredName]);
-      } else {
-        getOperation().emitError("expected to find ")
-            << loweredName << " for value";
-      }
+      assert(loweredBundleValues[value].count(loweredName) &&
+             "no lowered bundle value");
+
+      results.push_back(loweredBundleValues[value][loweredName]);
     }
   }
 }
